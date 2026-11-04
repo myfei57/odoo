@@ -7,6 +7,7 @@ import itertools
 import json
 import logging
 import operator
+import zipfile
 from collections import OrderedDict, defaultdict
 
 from werkzeug.exceptions import InternalServerError
@@ -428,6 +429,38 @@ class ExportFormat:
     def from_group_data(self, fields, columns_headers, groups):
         raise NotImplementedError()
 
+    def _get_chunk_size(self, params):
+        """ Return the maximum number of main records allowed in each exported
+        volume, or ``None`` when the regular single-file export is requested.
+        """
+
+    def _iter_record_rows(self, records, field_names):
+        """ Yield the exported rows of each main record, in export order.
+
+        Each yielded value groups all the lines generated for one main record,
+        so the additional lines produced by the expansion of one2many fields
+        stay attached to their record. Record boundaries are detected through
+        a leading ``.id`` column, whose value is only set on the main line of
+        a record (as done for grouped exports).
+        """
+        Model = records.browse()
+        for batch in split_every(IN_MAX, records.ids, Model.browse):
+            export_data = batch.export_data(['.id'] + field_names).get('datas', [])
+            record_rows = None
+            for row in export_data:
+                if row[0]:  # Main line of a record: its database id is in column 0
+                    if record_rows is not None:
+                        yield record_rows
+                    record_rows = [row[1:]]
+                else:  # Extra line coming from an expanded relational field
+                    record_rows.append(row[1:])
+            if record_rows is not None:
+                yield record_rows
+            batch.invalidate_recordset()
+
+    def from_chunked_data(self, fields, columns_headers, records, field_names, chunk_size, model):
+        raise NotImplementedError()
+
     def base(self, data):
         params = json.loads(data)
         model, fields, ids, domain, import_compat = \
@@ -444,6 +477,8 @@ class ExportFormat:
             columns_headers = [val['label'].strip() for val in fields]
 
         records = Model.browse(ids) if ids else Model.search(domain)
+
+        extension, content_type = self.extension, self.content_type
 
         groupby = params.get('groupby')
         if not import_compat and groupby:
@@ -492,13 +527,21 @@ class ExportFormat:
 
             response_data = self.from_group_data(fields, columns_headers, tree)
         else:
-            all_rows = []
-            for batch in split_every(IN_MAX, records.ids, Model.browse):
-                export_data = batch.export_data(field_names).get('datas', [])
-                all_rows.extend(export_data)
-                batch.invalidate_recordset()
+            chunk_size = self._get_chunk_size(params)
+            if chunk_size:
+                # Split the records into CSV volumes bundled in a ZIP archive
+                extension, content_type = '.zip', 'application/zip'
+                response_data = self.from_chunked_data(
+                    fields, columns_headers, records, field_names, chunk_size, model,
+                )
+            else:
+                all_rows = []
+                for batch in split_every(IN_MAX, records.ids, Model.browse):
+                    export_data = batch.export_data(field_names).get('datas', [])
+                    all_rows.extend(export_data)
+                    batch.invalidate_recordset()
 
-            response_data = self.from_data(fields, columns_headers, all_rows)
+                response_data = self.from_data(fields, columns_headers, all_rows)
 
         _logger.info(
             "User %d exported %d %r records from %s. Fields: %s. %s: %s",
@@ -512,8 +555,8 @@ class ExportFormat:
         return request.make_response(response_data,
             headers=[('Content-Disposition',
                             content_disposition(
-                                osutil.clean_filename(self.filename(model) + self.extension))),
-                     ('Content-Type', self.content_type)],
+                                osutil.clean_filename(self.filename(model) + extension))),
+                     ('Content-Type', content_type)],
         )
 
 
@@ -542,6 +585,62 @@ class CSVExport(ExportFormat, Controller):
 
     def from_group_data(self, fields, columns_headers, groups):
         raise UserError(request.env._("Exporting grouped data to csv is not supported."))
+
+    def _get_chunk_size(self, params):
+        chunk_size = params.get('chunk_size')
+        if chunk_size is None:
+            return None
+        if isinstance(chunk_size, bool) or not isinstance(chunk_size, int) or chunk_size <= 0:
+            raise UserError(request.env._("The number of records per exported volume must be a positive integer."))
+        return chunk_size
+
+    def from_chunked_data(self, fields, columns_headers, records, field_names, chunk_size, model):
+        """ Split the exported rows into CSV volumes bundled in a ZIP archive.
+
+        A volume contains at most ``chunk_size`` main records; all the lines
+        expanded from one main record (e.g. one2many fields) are kept in the
+        same volume. Every volume embeds the full column headers, and the
+        archive contains a ``manifest.csv`` listing the number of main records
+        and data rows of each volume. An empty export produces a single volume
+        containing only the headers.
+        """
+        volumes = []  # [(main record count, data rows)]
+        volume_rows = []
+        record_count = 0
+        for record_rows in self._iter_record_rows(records, field_names):
+            if record_count == chunk_size:
+                volumes.append((record_count, volume_rows))
+                volume_rows, record_count = [], 0
+            volume_rows.extend(record_rows)
+            record_count += 1
+        if record_count or not volumes:
+            # Always emit at least one volume (header-only when there is no record)
+            volumes.append((record_count, volume_rows))
+
+        base_name = osutil.clean_filename(self.filename(model))
+        number_width = max(3, len(str(len(volumes))))
+
+        manifest_fp = io.StringIO()
+        manifest_writer = csv.writer(manifest_fp, quoting=csv.QUOTE_ALL)
+        manifest_writer.writerow(['filename', 'main_record_count', 'data_row_count'])
+        for volume_index, (main_record_count, rows) in enumerate(volumes, start=1):
+            manifest_writer.writerow([
+                f"{base_name}_{volume_index:0{number_width}d}.csv",
+                main_record_count,
+                len(rows),
+            ])
+
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED, allowZip64=True) as archive:
+            archive.writestr('manifest.csv', manifest_fp.getvalue().encode('utf-8'))
+            for volume_index, (main_record_count, rows) in enumerate(volumes, start=1):
+                volume_filename = f"{base_name}_{volume_index:0{number_width}d}.csv"
+                archive.writestr(
+                    volume_filename,
+                    self.from_data(fields, columns_headers, rows).encode('utf-8'),
+                )
+
+        return buffer.getvalue()
 
     def from_data(self, fields, columns_headers, rows):
         fp = io.StringIO()
