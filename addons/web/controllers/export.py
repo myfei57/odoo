@@ -22,6 +22,13 @@ from odoo.tools.constants import IN_MAX
 _logger = logging.getLogger(__name__)
 
 
+def is_fixed_column(field_spec):
+    """A fixed value column holds a user-defined constant instead of a field
+    path. It must never be resolved against the exported model.
+    """
+    return field_spec.get('is_fixed') is True or field_spec.get('type') == 'fixed'
+
+
 def none_values_filtered(func):
     @functools.wraps(func)
     def wrap(iterable):
@@ -191,6 +198,14 @@ class ExportXlsxWriter:
         self.worksheet = self.workbook.add_worksheet()
         self.value = False
 
+        # Indexes (and constant text) of fixed value columns; their content is
+        # user-defined text and must not be interpreted as a formula.
+        self.fixed_values = {
+            index: str(field.get('fixed_value') or '')
+            for index, field in enumerate(fields)
+            if is_fixed_column(field)
+        }
+
         if row_count > self.worksheet.xls_rowmax:
             raise UserError(request.env._('There are too many rows (%(count)s rows, limit: %(limit)s) to export as Excel 2007-2013 (.xlsx) format. Consider splitting the export.', count=row_count, limit=self.worksheet.xls_rowmax))
 
@@ -213,10 +228,22 @@ class ExportXlsxWriter:
             self.value = self.output.getvalue()
 
     def write(self, row, column, cell_value, style=None):
-        self.worksheet.write(row, column, cell_value, style)
+        # Fixed values are free text constants: force the string writer so
+        # content starting with '=' / '+' / '-' is never parsed as a formula.
+        if column in self.fixed_values and isinstance(cell_value, str):
+            self.worksheet.write_string(row, column, cell_value, style)
+        else:
+            self.worksheet.write(row, column, cell_value, style)
 
     def write_cell(self, row, column, cell_value):
         cell_style = self.base_style
+
+        if column in self.fixed_values:
+            cell_value = str(cell_value or '').replace("\r", " ")
+            if len(cell_value) > self.worksheet.xls_strmax:
+                cell_value = request.env._("The content of this cell is too long for an XLSX file (more than %s characters). Please use the CSV format for this export.", self.worksheet.xls_strmax)
+            self.write(row, column, cell_value, cell_style)
+            return
 
         if isinstance(cell_value, BinaryValue):
             cell_value = cell_value.to_base64()
@@ -263,7 +290,11 @@ class GroupExportXlsxWriter(ExportXlsxWriter):
         return row, column
 
     def _write_row(self, row, column, data):
-        for value in data:
+        values = iter(data)
+        # `data` is aligned on the real fields only; re-insert the fixed
+        # value columns at their saved position.
+        for col in range(len(self.fields)):
+            value = self.fixed_values[col] if col in self.fixed_values else next(values)
             self.write_cell(row, column, value)
             column += 1
         return row + 1, 0
@@ -386,9 +417,9 @@ class Export(Controller):
 
     @route('/web/export/namelist', type='jsonrpc', auth='user', readonly=True)
     def namelist(self, model, export_id):
-        export = self.env['ir.exports'].browse([export_id])
+        export = self.env['ir.exports'].browse([export_id]).exists()
         return {
-            'fields': self.env['ir.exports']._get_fields_info(model, export.export_fields.mapped('name')),
+            'fields': export._get_export_columns_info(model) if export else [],
             'export_languages': export.export_language_ids.filtered('active').mapped('code'),
         }
 
@@ -430,18 +461,54 @@ class ExportFormat:
 
     def base(self, data):
         params = json.loads(data)
-        model, fields, ids, domain, import_compat = \
+        model, fields_spec, ids, domain, import_compat = \
             operator.itemgetter('model', 'fields', 'ids', 'domain', 'import_compat')(params)
 
         Model = request.env[model].with_context(import_compat=import_compat, **params.get('context', {}))
         if not Model._is_an_ordinary_table():
-            fields = [field for field in fields if field['name'] != 'id']
+            fields_spec = [
+                field for field in fields_spec
+                if is_fixed_column(field) or field['name'] != 'id'
+            ]
 
-        field_names = [f['name'] for f in fields]
+        # Fixed value columns are user-defined constants: they are split off
+        # before touching the ORM, so their (free-text) "name" can never be
+        # resolved as a model field nor used to read data.
+        fixed_columns = {
+            index: str(spec.get('fixed_value') or '')
+            for index, spec in enumerate(fields_spec)
+            if is_fixed_column(spec)
+        }
+        if import_compat and fixed_columns:
+            fixed_titles = ', '.join(
+                (spec.get('label') or spec.get('name') or '').strip()
+                for index, spec in enumerate(fields_spec)
+                if index in fixed_columns
+            )
+            raise UserError(request.env._(
+                "Import-compatible exports cannot contain fixed value columns"
+                " (%(columns)s): such columns do not correspond to any field"
+                " of the model and therefore cannot be reimported. Uncheck"
+                " \"Updatable fields only\" to export them.",
+                columns=fixed_titles,
+            ))
+
+        field_names = [spec['name'] for spec in fields_spec if not is_fixed_column(spec)]
         if import_compat:
             columns_headers = field_names
         else:
-            columns_headers = [val['label'].strip() for val in fields]
+            columns_headers = [val['label'].strip() for val in fields_spec]
+
+        def insert_fixed_values(row):
+            # Re-interleave the constant columns at their saved position;
+            # `row` is aligned on `field_names` (real fields only).
+            if not fixed_columns:
+                return row
+            values = iter(row)
+            return [
+                fixed_columns[index] if index in fixed_columns else next(values)
+                for index in range(len(fields_spec))
+            ]
 
         records = Model.browse(ids) if ids else Model.search(domain)
 
@@ -490,15 +557,15 @@ class ExportFormat:
             for group_info, group_rows in zip(groups_data, grouped_rows):
                 tree.insert_leaf(group_info, group_rows)
 
-            response_data = self.from_group_data(fields, columns_headers, tree)
+            response_data = self.from_group_data(fields_spec, columns_headers, tree)
         else:
             all_rows = []
             for batch in split_every(IN_MAX, records.ids, Model.browse):
                 export_data = batch.export_data(field_names).get('datas', [])
-                all_rows.extend(export_data)
+                all_rows.extend(insert_fixed_values(row) for row in export_data)
                 batch.invalidate_recordset()
 
-            response_data = self.from_data(fields, columns_headers, all_rows)
+            response_data = self.from_data(fields_spec, columns_headers, all_rows)
 
         _logger.info(
             "User %d exported %d %r records from %s. Fields: %s. %s: %s",

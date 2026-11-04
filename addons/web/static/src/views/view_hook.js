@@ -135,12 +135,22 @@ export function useExportRecords(env, context, getDefaultExportList) {
 
     const _downloadExport = async (fields, import_compat, format) => {
         const root = model.root;
-        const exportedFields = fields.map((field) => ({
-            name: field.name || field.id,
-            label: field.label || field.string,
-            store: field.store,
-            type: field.field_type || field.type,
-        }));
+        const exportedFields = fields.map((field) =>
+            field.is_fixed
+                ? {
+                      name: field.string,
+                      label: field.string,
+                      type: "fixed",
+                      is_fixed: true,
+                      fixed_value: field.fixed_value || "",
+                  }
+                : {
+                      name: field.name || field.id,
+                      label: field.label || field.string,
+                      store: field.store,
+                      type: field.field_type || field.type,
+                  }
+        );
         if (import_compat) {
             exportedFields.unshift({
                 name: "id",

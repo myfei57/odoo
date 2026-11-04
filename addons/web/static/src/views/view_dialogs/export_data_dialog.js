@@ -27,6 +27,14 @@ import { fuzzyLookup } from "@web/core/utils/search";
 import { useSortable } from "@web/core/utils/sortable_owl";
 import { useDebounced } from "@web/core/utils/timing";
 
+/**
+ * Technical id prefix of unsaved fixed value columns; ids returned by the
+ * server for saved fixed columns use the same prefix. A fixed value column
+ * repeats a user-defined text on every exported row and is not linked to any
+ * field of the model.
+ */
+const FIXED_VALUE_PREFIX = "__fixed__:";
+
 class DeleteExportListDialog extends Component {
     static components = { Dialog };
     static template = "web.DeleteExportListDialog";
@@ -150,11 +158,29 @@ export class ExportDataDialog extends Component {
             templateName: "",
             isSmall: this.uiService.isSmall,
             disabled: false,
+            fixedTitle: "",
+            fixedValue: "",
+            editingFixedId: null,
         });
 
         this.removeFieldText = _t("Remove field");
         this.applyChangesText = _t("Apply changes");
         this.noChangesText = _t("No changes to apply");
+        this.fixedColumnText = _t("Fixed");
+        this.addFixedColumnText = _t("Add fixed value column");
+        this.editFixedColumnText = _t("Edit fixed value column");
+        this.fixedTitlePlaceholder = _t("Column title");
+        this.fixedValuePlaceholder = _t("Fixed value");
+        this.fixedTitleRequiredText = _t(
+            "The fixed value column must have a title."
+        );
+        this.fixedColumnsSkippedText = _t(
+            "Fixed value columns do not correspond to any field of the model and "
+            + "cannot be reimported, so they are not supported by import-compatible "
+            + "exports."
+        );
+
+        this.fixedColumnSeq = 0;
 
         this.debouncedOnResize = useDebounced(this.updateSize.bind(this), 300);
 
@@ -162,7 +188,8 @@ export class ExportDataDialog extends Component {
             // Params
             ref: this.draggableRef,
             elements: ".o_export_field",
-            ignore: ".o_remove_field",
+            ignore:
+                ".o_remove_field, .o_edit_fixed_field, .o_fixed_apply, .o_fixed_cancel, input, button",
             enable: !this.state.isSmall,
             cursor: "grabbing",
             // Hooks
@@ -354,7 +381,17 @@ export class ExportDataDialog extends Component {
             export_id: Number(value),
         });
         // Don't safe the result in this.knownFields because, the result is only partial
-        this.state.exportList = fields;
+        const fixedColumns = fields.filter((field) => field.is_fixed);
+        if (this.isCompatible && fixedColumns.length) {
+            // Fixed value columns cannot be reimported: the import-compatible
+            // export rejects them server-side as well, skip them here too.
+            this.notification.add(this.fixedColumnsSkippedText, { type: "warning" });
+        }
+        this.state.exportList =
+            this.isCompatible && fixedColumns.length
+                ? fields.filter((field) => !field.is_fixed)
+                : fields;
+        this.state.editingFixedId = null;
         this.state.exportLanguages = this.languagesInstalled.filter(({ code }) =>
             export_languages.includes(code)
         );
@@ -405,7 +442,78 @@ export class ExportDataDialog extends Component {
     onRemoveItemExportList(fieldId) {
         const item = this.state.exportList.findIndex(({ id }) => id === fieldId);
         this.state.exportList.splice(item, 1);
+        if (this.state.editingFixedId === fieldId) {
+            this.state.editingFixedId = null;
+        }
         this.resetTemplateSelection();
+    }
+
+    onFixedComposerInput(attr, ev) {
+        this.state[attr] = ev.target.value;
+    }
+
+    onFixedComposerKeydown(ev) {
+        if (ev.key === "Enter" && this.state.fixedTitle.trim()) {
+            ev.preventDefault();
+            this.onAddFixedColumn();
+        }
+    }
+
+    onAddFixedColumn() {
+        const title = this.state.fixedTitle.trim();
+        if (!title) {
+            this.notification.add(this.fixedTitleRequiredText, { type: "danger" });
+            return;
+        }
+        this.state.exportList.push({
+            id: `${FIXED_VALUE_PREFIX}new-${this.fixedColumnSeq++}`,
+            string: title,
+            field_type: "fixed",
+            is_fixed: true,
+            fixed_value: this.state.fixedValue,
+        });
+        this.state.fixedTitle = "";
+        this.state.fixedValue = "";
+        this.resetTemplateSelection();
+    }
+
+    onEditFixedColumn(field) {
+        this._fixedSnapshot = {
+            string: field.string,
+            fixed_value: field.fixed_value,
+        };
+        this.state.editingFixedId = field.id;
+    }
+
+    onFixedFieldInput(field, attr, ev) {
+        field[attr] = ev.target.value;
+        this.resetTemplateSelection();
+    }
+
+    onSaveFixedColumn(field) {
+        const title = field.string.trim();
+        if (!title) {
+            this.notification.add(this.fixedTitleRequiredText, { type: "danger" });
+            return;
+        }
+        field.string = title;
+        this.state.editingFixedId = null;
+        this.resetTemplateSelection();
+    }
+
+    onCancelFixedColumnEdit(field) {
+        Object.assign(field, this._fixedSnapshot || {});
+        this.state.editingFixedId = null;
+    }
+
+    onFixedFieldKeydown(field, ev) {
+        if (ev.key === "Enter") {
+            ev.preventDefault();
+            this.onSaveFixedColumn(field);
+        } else if (ev.key === "Escape") {
+            ev.preventDefault();
+            this.onCancelFixedColumnEdit(field);
+        }
     }
 
     async onChangeExportList(ev) {
@@ -445,7 +553,17 @@ export class ExportDataDialog extends Component {
             ? this.state.exportLanguages.map(({ id }) => id)
             : [];
         const exportFieldsCommands = this.state.exportList.map((field, index) =>
-            x2ManyCommands.create(false, { name: field.id, sequence: (index + 1) * 10 })
+            field.is_fixed
+                ? x2ManyCommands.create(false, {
+                      line_type: "fixed",
+                      name: field.string,
+                      fixed_value: field.fixed_value || "",
+                      sequence: (index + 1) * 10,
+                  })
+                : x2ManyCommands.create(false, {
+                      name: field.id,
+                      sequence: (index + 1) * 10,
+                  })
         );
         if (this.state.templateId === "new_template") {
             const [id] = await this.orm.create(
@@ -484,6 +602,7 @@ export class ExportDataDialog extends Component {
 
     onCancelExportTemplate() {
         this.state.isEditingTemplate = false;
+        this.state.editingFixedId = null;
         if (this.state.templateId === "new_template") {
             this.state.templateId = null;
             return;
@@ -494,6 +613,15 @@ export class ExportDataDialog extends Component {
     async onClickExportButton() {
         if (!this.state.exportList.length) {
             return this.notification.add(_t("Please select fields to save export list..."), {
+                type: "danger",
+            });
+        }
+        if (
+            this.isCompatible &&
+            this.state.exportList.some((field) => field.is_fixed)
+        ) {
+            // Defense in depth: the server rejects such exports as well.
+            return this.notification.add(this.fixedColumnsSkippedText, {
                 type: "danger",
             });
         }
@@ -572,9 +700,19 @@ export class ExportDataDialog extends Component {
         return lookupResult;
     }
 
-    onToggleCompatibleExport(value) {
+    async onToggleCompatibleExport(value) {
         this.isCompatible = value;
-        this.fetchFields(true);
+        await this.fetchFields(true);
+        if (value) {
+            const fixedColumns = this.state.exportList.filter((field) => field.is_fixed);
+            if (fixedColumns.length) {
+                this.state.exportList = this.state.exportList.filter(
+                    (field) => !field.is_fixed
+                );
+                this.state.editingFixedId = null;
+                this.notification.add(this.fixedColumnsSkippedText, { type: "warning" });
+            }
+        }
     }
 
     async setDefaultExportList() {

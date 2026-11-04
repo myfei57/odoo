@@ -57,11 +57,30 @@
             }
         }
 
+        .o_fields_list {
+            flex: 1 1 auto;
+            min-height: 0;
+            overflow: auto;
+            margin: 0;
+        }
+
         .o_export_field_sortable {
             cursor: grab;
 
             .o_remove_field {
                 cursor: pointer;
+            }
+        }
+
+        .o_add_fixed_column,
+        .o_export_fixed_field input {
+            user-select: text;
+        }
+
+        .o_export_fixed_field {
+            .o_fixed_title_input,
+            .o_fixed_value_input {
+                min-width: 0;
             }
         }
     }

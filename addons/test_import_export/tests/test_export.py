@@ -1,8 +1,11 @@
+import csv
+import io
 import json
 from datetime import date
 from unittest.mock import patch
 
 from odoo import Command, http
+from odoo.exceptions import ValidationError
 from odoo.tests import common, tagged, warmup
 from odoo.tools.misc import get_lang
 from odoo.addons.web.controllers.export import ExportXlsxWriter
@@ -772,3 +775,202 @@ class TestGroupedExport(XlsxCreatorCase):
                 ['April 2026 (0)'],
             ],
         )
+
+
+@tagged('post_install', '-at_install')
+class TestFixedValueColumns(XlsxCreatorCase):
+    """A fixed value column repeats a user-defined text on every exported
+    row, can be interleaved with real fields, and is never resolved as a
+    model field nor used to read data."""
+
+    def _fixed_field_specs(self):
+        return [
+            {'name': 'name', 'label': 'Name', 'type': 'char'},
+            {'name': 'Source', 'label': 'Source', 'type': 'fixed',
+             'is_fixed': True, 'fixed_value': 'ERP-42'},
+            {'name': 'function', 'label': 'Job Position', 'type': 'char'},
+            {'name': 'Batch', 'label': 'Batch', 'type': 'fixed',
+             'is_fixed': True, 'fixed_value': '=B2026-01'},
+        ]
+
+    def _make_partners(self):
+        return self.env['res.partner'].create([
+            {'name': 'Alice', 'function': 'Buyer'},
+            {'name': 'Bob', 'function': False},
+        ])
+
+    def _export_request(self, url, params):
+        default = {
+            'domain': [], 'fields': [], 'groupby': [], 'ids': False,
+            'import_compat': False, 'model': 'res.partner',
+        }
+        return self.url_open(
+            url,
+            data={
+                'data': json.dumps(dict(default, **params)),
+                'csrf_token': self.csrf_token(),
+            },
+        )
+
+    def test_csv_fixed_value_columns(self):
+        partners = self._make_partners()
+        res = self._export_request(
+            '/web/export/csv',
+            {'ids': partners.ids, 'fields': self._fixed_field_specs()},
+        )
+        rows = list(csv.reader(io.StringIO(res.content.decode())))
+        self.assertEqual(rows, [
+            ['Name', 'Source', 'Job Position', 'Batch'],
+            ['Alice', 'ERP-42', 'Buyer', "'=B2026-01"],
+            ['Bob', 'ERP-42', '', "'=B2026-01"],
+        ])
+
+    def test_csv_only_fixed_columns(self):
+        partners = self._make_partners()
+        specs = self._fixed_field_specs()[1:2]  # a single fixed column
+        res = self._export_request(
+            '/web/export/csv',
+            {'ids': partners.ids, 'fields': specs},
+        )
+        rows = list(csv.reader(io.StringIO(res.content.decode())))
+        self.assertEqual(rows, [['Source'], ['ERP-42'], ['ERP-42']])
+
+    def test_csv_empty_recordset_has_header_only(self):
+        res = self._export_request(
+            '/web/export/csv',
+            {'domain': [('id', '=', False)], 'fields': self._fixed_field_specs()},
+        )
+        rows = list(csv.reader(io.StringIO(res.content.decode())))
+        self.assertEqual(rows, [['Name', 'Source', 'Job Position', 'Batch']])
+
+    def test_xlsx_fixed_value_columns(self):
+        partners = self._make_partners()
+        export = self.export(params={
+            'model': 'res.partner',
+            'ids': partners.ids,
+            'fields': self._fixed_field_specs(),
+        })
+        self.assertExportEqual(
+            export,
+            [
+                ['Name', 'Source', 'Job Position', 'Batch'],
+                ['Alice', 'ERP-42', 'Buyer', '=B2026-01'],
+                ['Bob', 'ERP-42', '', '=B2026-01'],
+            ],
+        )
+
+    def test_xlsx_empty_recordset_has_header_only(self):
+        export = self.export(params={
+            'model': 'res.partner',
+            'ids': False,
+            'domain': [('id', '=', False)],
+            'fields': self._fixed_field_specs(),
+        })
+        self.assertExportEqual(
+            export,
+            [['Name', 'Source', 'Job Position', 'Batch']],
+        )
+
+    def test_xlsx_grouped_fixed_value_columns(self):
+        self.make([{'int_sum': 10}, {'int_sum': 10}])
+        export = self.export(params={
+            'groupby': ['int_sum'],
+            'fields': [
+                {'name': 'int_sum', 'label': 'Int Sum', 'type': 'integer'},
+                {'name': 'Batch', 'label': 'Batch', 'type': 'fixed',
+                 'is_fixed': True, 'fixed_value': 'B-1'},
+            ],
+        })
+        self.assertExportEqual(
+            export,
+            [
+                ['Int Sum', 'Batch'],
+                ['10 (2)', ''],
+                ['10', 'B-1'],
+                ['10', 'B-1'],
+            ],
+        )
+
+    def test_fixed_columns_are_never_passed_to_the_orm(self):
+        partners = self._make_partners()
+        ResPartner = self.registry['res.partner']
+        with patch.object(
+                ResPartner, 'export_data', autospec=True,
+                side_effect=ResPartner.export_data) as mocked:
+            self.export(params={
+                'model': 'res.partner',
+                'ids': partners.ids,
+                'fields': self._fixed_field_specs(),
+            })
+        self.assertTrue(mocked.call_args_list)
+        for mocked_call in mocked.call_args_list:
+            self.assertEqual(mocked_call.args[1], ['name', 'function'])
+
+    def test_import_compatible_export_rejects_fixed_columns(self):
+        partners = self._make_partners()
+        res = self._export_request(
+            '/web/export/xlsx',
+            {
+                'ids': partners.ids,
+                'import_compat': True,
+                'fields': [
+                    {'name': 'name', 'label': 'name'},
+                    {'name': 'Source', 'label': 'Source', 'type': 'fixed',
+                     'is_fixed': True, 'fixed_value': 'ERP-42'},
+                ],
+            },
+        )
+        self.assertEqual(res.status_code, 500)
+        self.assertIn('fixed value columns', res.text.lower())
+
+    def test_export_template_mixed_namelist(self):
+        def get_namelist(export_id):
+            res = self.url_open(
+                '/web/export/namelist',
+                data=json.dumps({
+                    'params': {'model': 'res.partner', 'export_id': export_id},
+                }),
+                headers={'Content-Type': 'application/json'},
+            )
+            return json.loads(res.content)['result']
+
+        export = self.env['ir.exports'].create({
+            'name': 'Mixed export',
+            'resource': 'res.partner',
+            'export_fields': [
+                Command.create({'name': 'name', 'sequence': 10}),
+                Command.create({
+                    'line_type': 'fixed', 'name': 'Source',
+                    'fixed_value': 'ERP-42', 'sequence': 20,
+                }),
+                Command.create({'name': 'function', 'sequence': 30}),
+            ],
+        })
+        fixed_line = export.export_fields.filtered(
+            lambda line: line.line_type == 'fixed',
+        )
+        self.assertEqual(get_namelist(export.id)['fields'], [
+            {'id': 'name', 'field_type': 'char',
+             'string': 'Name', 'translate': False},
+            {'id': f'__fixed__:{fixed_line.id}', 'field_type': 'fixed',
+             'string': 'Source', 'is_fixed': True, 'fixed_value': 'ERP-42'},
+            {'id': 'function', 'field_type': 'char',
+             'string': 'Job Position', 'translate': False},
+        ])
+
+    def test_legacy_field_line_stays_compatible(self):
+        # Templates created before fixed value columns existed have no
+        # line_type set: they default to regular field lines.
+        line = self.env['ir.exports.line'].create({'name': 'name'})
+        self.assertEqual(line.line_type, 'field')
+        self.assertFalse(line.fixed_value)
+
+    def test_fixed_line_requires_title(self):
+        with self.assertRaises(ValidationError):
+            self.env['ir.exports.line'].create({
+                'line_type': 'fixed', 'name': '   ', 'fixed_value': 'ERP-42',
+            })
+
+    def test_field_line_requires_name(self):
+        with self.assertRaises(ValidationError):
+            self.env['ir.exports.line'].create({'line_type': 'field', 'name': False})

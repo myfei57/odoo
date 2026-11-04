@@ -105,16 +105,37 @@
                         </t>
                     </div>
                 </div>
-                <div class="o_right_field_panel p-1 overflow-auto border">
+                <div class="o_right_field_panel p-1 overflow-hidden border d-flex flex-column">
                     <ul class="o_fields_list list-unstyled" t-ref="this.draggableRef">
                         <t t-foreach="this.state.exportList" t-as="field" t-key="field.id">
-                            <li t-attf-class="o_export_field d-flex align-items-center w-100 {{ this.state.isSmall ? '' : 'o_export_field_sortable' }}" t-att-data-field_id="field.id">
+                            <li t-attf-class="o_export_field d-flex align-items-center w-100 {{ field.is_fixed ? 'o_export_fixed_field' : '' }} {{ this.state.isSmall ? '' : 'o_export_field_sortable' }}" t-att-data-field_id="field.id">
                                 <span t-if="!this.state.isSmall" class="oi o_sort_field mx-1" data-icon="swap_vert" t-attf-style="opacity:{{ this.state.exportList.length === 1 ? 0 : 1 }}" />
-                                <span class="flex-grow-1 text-truncate" t-out="this.debugMode.isActive() and field.id ? `${field.string} (${field.id})` : field.string" />
-                                <span class="oi oi-filled p-1 o_remove_field cursor-pointer" data-icon="delete" t-att-title="this.removeFieldText" t-on-click.stop="() => this.onRemoveItemExportList(field.id)" />
+                                <t t-if="field.is_fixed &amp;&amp; this.state.editingFixedId === field.id">
+                                    <input type="text" class="form-control form-control-sm o_fixed_title_input me-1" t-att-placeholder="this.fixedTitlePlaceholder" t-att-value="field.string" t-on-input.stop="(ev) => this.onFixedFieldInput(field, 'string', ev)" t-on-keydown.stop="(ev) => this.onFixedFieldKeydown(field, ev)" />
+                                    <input type="text" class="form-control form-control-sm o_fixed_value_input me-1" t-att-placeholder="this.fixedValuePlaceholder" t-att-value="field.fixed_value" t-on-input.stop="(ev) => this.onFixedFieldInput(field, 'fixed_value', ev)" t-on-keydown.stop="(ev) => this.onFixedFieldKeydown(field, ev)" />
+                                    <span class="oi oi-filled p-1 o_fixed_apply cursor-pointer" data-icon="check" title="Apply" t-on-click.stop="() => this.onSaveFixedColumn(field)" />
+                                    <span class="oi oi-filled p-1 o_fixed_cancel cursor-pointer" data-icon="close" title="Discard" t-on-click.stop="() => this.onCancelFixedColumnEdit(field)" />
+                                </t>
+                                <t t-else="">
+                                    <span class="flex-grow-1 text-truncate">
+                                        <span t-if="field.is_fixed" class="badge text-bg-light border me-1 o_fixed_badge" t-out="this.fixedColumnText" />
+                                        <span t-if="field.is_fixed" t-out="field.fixed_value ? `${field.string} = ${field.fixed_value}` : field.string" />
+                                        <span t-else="" t-out="this.debugMode.isActive() and field.id ? `${field.string} (${field.id})` : field.string" />
+                                    </span>
+                                    <span t-if="field.is_fixed" class="oi oi-filled p-1 o_edit_fixed_field cursor-pointer" data-icon="edit" t-att-title="this.editFixedColumnText" t-on-click.stop="() => this.onEditFixedColumn(field)" />
+                                    <span class="oi oi-filled p-1 o_remove_field cursor-pointer" data-icon="delete" t-att-title="this.removeFieldText" t-on-click.stop="() => this.onRemoveItemExportList(field.id)" />
+                                </t>
                             </li>
                         </t>
                     </ul>
+                    <div t-if="!this.isCompatible" class="o_add_fixed_column d-flex align-items-center gap-1 mt-auto pt-1 border-top">
+                        <input type="text" class="form-control form-control-sm o_fixed_column_title" t-att-placeholder="this.fixedTitlePlaceholder" t-att-value="this.state.fixedTitle" t-on-input.stop="(ev) => this.onFixedComposerInput('fixedTitle', ev)" t-on-keydown.stop="this.onFixedComposerKeydown" />
+                        <input type="text" class="form-control form-control-sm o_fixed_column_value" t-att-placeholder="this.fixedValuePlaceholder" t-att-value="this.state.fixedValue" t-on-input.stop="(ev) => this.onFixedComposerInput('fixedValue', ev)" t-on-keydown.stop="this.onFixedComposerKeydown" />
+                        <button type="button" class="btn btn-secondary btn-sm o_add_fixed_column_btn text-nowrap" t-att-title="this.addFixedColumnText" t-att-disabled="!this.state.fixedTitle.trim()" t-on-click.stop="this.onAddFixedColumn">
+                            <i class="oi me-1" data-icon="plus"/>
+                            <span t-out="this.fixedColumnText"/>
+                        </button>
+                    </div>
                 </div>
                 <div t-if="this.canExportTranslations" class="d-flex align-items-stretch gap-2">
                     <span class="form-label mb-0 fw-bold text-nowrap align-self-center">Languages</span>

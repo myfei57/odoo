@@ -67,6 +67,14 @@ class IrExports extends models.Model {
 class IrExportsLine extends models.Model {
     _name = "ir.exports.line";
     name = fields.Char();
+    line_type = fields.Selection({
+        selection: [
+            ["field", "Field"],
+            ["fixed", "Fixed Value"],
+        ],
+        default: "field",
+    });
+    fixed_value = fields.Char();
     export_id = fields.Many2one({ relation: "ir.exports" });
 }
 class ResLang extends models.Model {
@@ -1609,4 +1617,255 @@ test("Export dialog: clicking on 'save as template' focuses the template name in
     await contains(".o_create_exported_list").click();
     await animationFrame();
     expect(".o_save_list_name").toBeFocused();
+});
+
+test.tags("desktop");
+test("Export dialog: fixed value columns are added and exported on every row", async () => {
+    patchWithCleanup(download, {
+        _download: (options) => {
+            expect.step("download");
+            const data = JSON.parse(options.data.data);
+            expect(data.import_compat).toBe(false);
+            expect(data.fields.map((field) => field.name)).toEqual([
+                "foo",
+                "Source",
+                "Batch",
+            ]);
+            expect(data.fields[1]).toEqual({
+                name: "Source",
+                label: "Source",
+                type: "fixed",
+                is_fixed: true,
+                fixed_value: "ERP-42",
+            });
+            expect(data.fields[2]).toEqual({
+                name: "Batch",
+                label: "Batch",
+                type: "fixed",
+                is_fixed: true,
+                fixed_value: "",
+            });
+        },
+    });
+    onRpc("/web/export/formats", () => [{ tag: "csv", label: "CSV" }]);
+    onRpc("/web/export/get_fields", () => fetchedFields.root);
+
+    await mountView({
+        type: "list",
+        resModel: "partner",
+        arch: `<list><field name="foo"/></list>`,
+        loadActionMenus: true,
+    });
+
+    await openExportDialog();
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual(["Foo"]);
+    expect(".o_add_fixed_column").toHaveCount(1, {
+        message: "the fixed value column composer is available in regular export mode",
+    });
+    expect(".o_add_fixed_column_btn").toBeDisabled();
+
+    await contains(".o_fixed_column_title").edit("Source", { confirm: false });
+    await contains(".o_fixed_column_value").edit("ERP-42", { confirm: false });
+    expect(".o_add_fixed_column_btn").toBeEnabled();
+    await contains(".o_add_fixed_column_btn").click();
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual([
+        "Foo",
+        "Fixed Source = ERP-42",
+    ]);
+
+    // a fixed column may have an empty value
+    await contains(".o_fixed_column_title").edit("Batch", { confirm: false });
+    await contains(".o_add_fixed_column_btn").click();
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual([
+        "Foo",
+        "Fixed Source = ERP-42",
+        "Fixed Batch",
+    ]);
+
+    await contains(".o_select_button").click();
+    expect.verifySteps(["download"]);
+});
+
+test.tags("desktop");
+test("Export dialog: fixed value columns are editable", async () => {
+    onRpc("/web/export/formats", () => [{ tag: "csv", label: "CSV" }]);
+    onRpc("/web/export/get_fields", () => fetchedFields.root);
+
+    await mountView({
+        type: "list",
+        resModel: "partner",
+        arch: `<list><field name="foo"/></list>`,
+        loadActionMenus: true,
+    });
+
+    await openExportDialog();
+    await contains(".o_fixed_column_title").edit("Source", { confirm: false });
+    await contains(".o_fixed_column_value").edit("ERP-42", { confirm: false });
+    await contains(".o_add_fixed_column_btn").click();
+
+    await contains(".o_edit_fixed_field").click();
+    await contains(".o_fixed_title_input").edit("Origin", { confirm: false });
+    await contains(".o_fixed_value_input").edit("SYS-A", { confirm: false });
+    await contains(".o_fixed_apply").click();
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual([
+        "Foo",
+        "Fixed Origin = SYS-A",
+    ]);
+});
+
+test.tags("desktop");
+test("Export dialog: templates save and reload fixed value columns interleaved with fields", async () => {
+    onRpc("/web/export/formats", () => [{ tag: "csv", label: "CSV" }]);
+    onRpc("/web/export/get_fields", () => fetchedFields.root);
+    onRpc("/web/export/namelist", async (request) => {
+        const { params } = await request.json();
+        if (params.export_id === 1) {
+            return {
+                fields: [
+                    { id: "foo", string: "Foo", field_type: "char" },
+                    {
+                        id: "__fixed__:9",
+                        string: "Source",
+                        field_type: "fixed",
+                        is_fixed: true,
+                        fixed_value: "ERP-42",
+                    },
+                ],
+                export_languages: [],
+            };
+        }
+        return { fields: [], export_languages: [] };
+    });
+    onRpc(({ args, method, model }) => {
+        if (method === "search_read" && model === "ir.exports") {
+            return [{ id: 1, name: "Mixed template" }];
+        }
+        if (model !== "ir.exports" || method !== "write") {
+            return;
+        }
+        expect.step("write template");
+        const commands = args[1].export_fields;
+        expect(commands[0][0]).toBe(5, { message: "the existing lines are cleared first" });
+        expect(commands[1][2]).toEqual({ name: "foo", sequence: 10 });
+        expect(commands[2][2]).toEqual({
+            line_type: "fixed",
+            name: "Source",
+            fixed_value: "ERP-42",
+            sequence: 20,
+        });
+        return true;
+    });
+
+    await mountView({
+        type: "list",
+        resModel: "partner",
+        arch: `<list><field name="foo"/></list>`,
+        loadActionMenus: true,
+    });
+
+    await openExportDialog();
+    await select("1", { target: ".o_exported_lists_select" });
+    await animationFrame();
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual([
+        "Foo",
+        "Fixed Source = ERP-42",
+    ]);
+    expect(".o_export_fixed_field .o_edit_fixed_field").toHaveCount(1);
+
+    // saving the loaded template persists the fixed column as a fixed line
+    await contains(".o_edit_exported_list").click();
+    await contains(".o_save_list_name").edit("Mixed template", { confirm: false });
+    await contains(".o_save_list_btn").click();
+    await animationFrame();
+    expect.verifySteps(["write template"]);
+});
+
+test.tags("desktop");
+test("Export dialog: fixed value columns are excluded from import-compatible exports", async () => {
+    patchWithCleanup(download, {
+        _download: () => {
+            expect.step("download should not be triggered");
+        },
+    });
+    onRpc("/web/export/formats", () => [{ tag: "csv", label: "CSV" }]);
+    onRpc("/web/export/get_fields", () => fetchedFields.root);
+
+    await mountView({
+        type: "list",
+        resModel: "partner",
+        arch: `<list><field name="foo"/></list>`,
+        loadActionMenus: true,
+    });
+
+    await openExportDialog();
+    await contains(".o_fixed_column_title").edit("Source", { confirm: false });
+    await contains(".o_fixed_column_value").edit("ERP-42", { confirm: false });
+    await contains(".o_add_fixed_column_btn").click();
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual([
+        "Foo",
+        "Fixed Source = ERP-42",
+    ]);
+
+    await contains(".o_export_compatible .form-check-input:first").click();
+    await animationFrame();
+    expect(".o_notification").toHaveText(/fixed value columns/i, {
+        message: "the user is told why fixed value columns are skipped",
+    });
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual(["Foo"]);
+    expect(".o_add_fixed_column").toHaveCount(0, {
+        message: "the composer is hidden in import-compatible mode",
+    });
+
+    await contains(".o_select_button").click();
+    expect(".o_notification").toHaveCount(2);
+    expect.verifySteps([]);
+});
+
+test.tags("desktop");
+test("Export dialog: templates with fixed columns skip them in import-compatible mode", async () => {
+    onRpc("/web/export/formats", () => [{ tag: "csv", label: "CSV" }]);
+    onRpc("/web/export/get_fields", () => fetchedFields.root);
+    onRpc("/web/export/namelist", async (request) => {
+        const { params } = await request.json();
+        if (params.export_id === 1) {
+            return {
+                fields: [
+                    { id: "foo", string: "Foo", field_type: "char" },
+                    {
+                        id: "__fixed__:9",
+                        string: "Source",
+                        field_type: "fixed",
+                        is_fixed: true,
+                        fixed_value: "ERP-42",
+                    },
+                ],
+                export_languages: [],
+            };
+        }
+        return { fields: [], export_languages: [] };
+    });
+    onRpc(({ args, method, model }) => {
+        if (method !== "search_read" || model !== "ir.exports") {
+            return;
+        }
+        return [{ id: 1, name: "Mixed template" }];
+    });
+
+    await mountView({
+        type: "list",
+        resModel: "partner",
+        arch: `<list><field name="foo"/></list>`,
+        loadActionMenus: true,
+    });
+
+    await openExportDialog();
+    await contains(".o_export_compatible .form-check-input:first").click();
+    await animationFrame();
+    await select("1", { target: ".o_exported_lists_select" });
+    await animationFrame();
+    expect(".o_notification").toHaveText(/fixed value columns/i);
+    expect(queryAllTexts(".o_right_field_panel .o_export_field")).toEqual(["Foo"], {
+        message: "only the real field is kept in import-compatible mode",
+    });
+    expect(".o_add_fixed_column").toHaveCount(0);
 });

@@ -4,6 +4,12 @@
 import itertools
 
 from odoo import api, fields, models
+from odoo.exceptions import ValidationError
+
+#: Prefix of the technical identifier used client-side to reference a fixed
+#: value column; it can never match a real field path.
+FIXED_VALUE_PREFIX = '__fixed__:'
+FIXED_VALUE_LINE_TYPE = 'fixed'
 
 
 class IrExports(models.Model):
@@ -156,6 +162,38 @@ class IrExports(models.Model):
             for field_info in self._get_fields_info(model, export_fields)
         )
 
+    def _get_export_columns_info(self, model):
+        """Return the columns of the template in their saved order.
+
+        Real field lines are resolved through :meth:`_get_fields_info`, while
+        fixed value lines are returned as constants. Fixed value columns are
+        never resolved against the model's fields and therefore cannot leak
+        field data nor bypass field access rights.
+        """
+        self.ensure_one()
+        lines = self.export_fields  # ordered by 'sequence, id'
+        field_lines = lines.filtered(lambda line: line.line_type != FIXED_VALUE_LINE_TYPE)
+        field_infos = {
+            field_info['id']: field_info
+            for field_info in self._get_fields_info(model, field_lines.mapped('name'))
+        }
+
+        columns_info = []
+        for line in lines:
+            if line.line_type == FIXED_VALUE_LINE_TYPE:
+                columns_info.append({
+                    'id': f"{FIXED_VALUE_PREFIX}{line.id}",
+                    'string': line.name,
+                    'field_type': 'fixed',
+                    'is_fixed': True,
+                    'fixed_value': line.fixed_value or '',
+                })
+            else:
+                field_info = field_infos.get(line.name)
+                if field_info is not None:
+                    columns_info.append(field_info)
+        return columns_info
+
 
 class IrExportsLine(models.Model):
     _name = 'ir.exports.line'
@@ -163,5 +201,27 @@ class IrExportsLine(models.Model):
     _order = 'sequence, id'
 
     sequence = fields.Integer(default=10)
-    name = fields.Char(string='Field Name')
+    name = fields.Char(
+        string='Field Name',
+        help="Technical path of the exported field, or the column title "
+             "of a fixed value column.")
+    line_type = fields.Selection(
+        [('field', "Field"), ('fixed', "Fixed Value")],
+        string='Column Type', default='field', required=True,
+        help="Field columns export the value of the corresponding model "
+             "field. Fixed value columns repeat a user-defined text on every "
+             "exported row and are not linked to any model field.")
+    fixed_value = fields.Char(
+        string='Fixed Value',
+        help="Constant text written in every exported row of this column.")
     export_id = fields.Many2one('ir.exports', string='Export', index=True, ondelete='cascade')
+
+    @api.constrains('name', 'line_type')
+    def _check_name(self):
+        for line in self:
+            if not line.name or not line.name.strip():
+                if line.line_type == FIXED_VALUE_LINE_TYPE:
+                    raise ValidationError(self.env._(
+                        "A fixed value column must have a column title."))
+                raise ValidationError(self.env._(
+                    "An export field line must reference a field."))
