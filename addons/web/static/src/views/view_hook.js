@@ -133,7 +133,7 @@ export function useExportRecords(env, context, getDefaultExportList) {
         });
     };
 
-    const _downloadExport = async (fields, import_compat, format) => {
+    const _downloadExport = async (fields, import_compat, format, exportOptions = {}) => {
         const root = model.root;
         const exportedFields = fields.map((field) => ({
             name: field.name || field.id,
@@ -147,20 +147,27 @@ export function useExportRecords(env, context, getDefaultExportList) {
                 label: _t("External ID"),
             });
         }
+        const exportData = {
+            import_compat,
+            context: root.context,
+            domain: root.domain,
+            fields: exportedFields,
+            groupby: root.groupBy,
+            ids:
+                !root.isDomainSelected && root.selection.length > 0
+                    ? root.selection.map((e) => e.resId)
+                    : false,
+            model: root.resModel,
+        };
+        if (exportOptions.deduplicate) {
+            exportData.deduplicate = true;
+            if (exportOptions.deduplicate_columns) {
+                exportData.deduplicate_columns = exportOptions.deduplicate_columns;
+            }
+        }
         await download({
             data: {
-                data: JSON.stringify({
-                    import_compat,
-                    context: root.context,
-                    domain: root.domain,
-                    fields: exportedFields,
-                    groupby: root.groupBy,
-                    ids:
-                        !root.isDomainSelected && root.selection.length > 0
-                            ? root.selection.map((e) => e.resId)
-                            : false,
-                    model: root.resModel,
-                }),
+                data: JSON.stringify(exportData),
             },
             url: `/web/export/${format}`,
         });

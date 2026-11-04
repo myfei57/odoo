@@ -44,6 +44,11 @@
         }
     }
 
+    .o_export_deduplicate_columns {
+        max-height: 10rem;
+        overflow: auto;
+    }
+
     .o_left_field_panel, .o_right_field_panel {
         user-select: none;
 

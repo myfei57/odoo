@@ -55,6 +55,24 @@ OPERATOR_MAPPING = {
 }
 
 
+def csv_cell_value(value):
+    """ Convert an exported value into the text actually written in a CSV cell.
+
+    The empty-value conversion (``None``/``False`` -> ``''``) and the formula
+    protection (leading ``=``, ``+`` or ``-`` prefixed with ``'``) are applied,
+    so the returned value is both what ends up in the file and what can be
+    compared to detect duplicate rows.
+    """
+    if value is None or value is False:
+        value = ''
+    elif isinstance(value, bytes):
+        value = value.decode()
+    # Spreadsheet apps tend to detect formulas on leading =, + and -
+    if isinstance(value, str) and value.startswith(('=', '-', '+')):
+        value = "'" + value
+    return value
+
+
 class GroupsTreeNode:
     """
     This class builds an ordered tree of groups from the result of a `formatted_read_group`.
@@ -395,6 +413,9 @@ class Export(Controller):
 
 class ExportFormat:
 
+    # Whether the format supports merging duplicate rows of the (non-grouped) export.
+    deduplication_supported = False
+
     @property
     def content_type(self):
         """ Provides the format's content type """
@@ -414,12 +435,17 @@ class ExportFormat:
         model_description = request.env['ir.model']._get(base).name
         return f"{model_description} ({base})"
 
-    def from_data(self, fields, columns_headers, rows):
+    def from_data(self, fields, columns_headers, rows, deduplicate=False, deduplicate_columns=None):
         """ Conversion method from Odoo's export data to whatever the
         current export class outputs
 
         :params list fields: a list of fields to export
         :params list rows: a list of records to export
+        :params bool deduplicate: when True, duplicate rows are merged: the
+            first occurrence is kept in its original position.
+        :params list deduplicate_columns: optional 0-based positions of the
+            output columns making up the duplication key. When unset, all
+            output columns are used.
         :returns:
         :rtype: bytes
         """
@@ -427,6 +453,40 @@ class ExportFormat:
 
     def from_group_data(self, fields, columns_headers, groups):
         raise NotImplementedError()
+
+    @staticmethod
+    def _check_deduplicate_columns(deduplicate_columns, column_count):
+        """ Validate the output column positions used as duplication key.
+
+        Positions are used instead of field names to distinguish columns
+        sharing the same header. The configuration must be a non-empty list of
+        unique, in-range integers.
+        """
+        if not isinstance(deduplicate_columns, list) or not deduplicate_columns:
+            raise UserError(request.env._(
+                "Merging duplicate rows based on specific columns requires "
+                "at least one output column.",
+            ))
+        checked_columns = []
+        for column in deduplicate_columns:
+            if isinstance(column, bool) or not isinstance(column, int):
+                raise UserError(request.env._(
+                    "The positions of the columns used to merge duplicate rows "
+                    "must be integers.",
+                ))
+            if column < 0 or column >= column_count:
+                raise UserError(request.env._(
+                    "Column position %(position)s is out of range: "
+                    "the export contains %(count)s column(s).",
+                    position=column, count=column_count,
+                ))
+            if column in checked_columns:
+                raise UserError(request.env._(
+                    "Column position %(position)s is selected more than once.",
+                    position=column,
+                ))
+            checked_columns.append(column)
+        return checked_columns
 
     def base(self, data):
         params = json.loads(data)
@@ -442,6 +502,30 @@ class ExportFormat:
             columns_headers = field_names
         else:
             columns_headers = [val['label'].strip() for val in fields]
+
+        deduplicate = params.get('deduplicate', False)
+        deduplicate_columns = params.get('deduplicate_columns')
+        if deduplicate:
+            # Merging rows of an import-compatible export could drop records
+            # needed to re-import relational data faithfully.
+            if import_compat:
+                raise UserError(request.env._(
+                    "Merging duplicate rows is not allowed for import-compatible "
+                    "exports, as it could break the re-import of relational data.",
+                ))
+            if params.get('groupby'):
+                raise UserError(request.env._(
+                    "Merging duplicate rows is only available for standard, "
+                    "non-grouped exports.",
+                ))
+            if not self.deduplication_supported:
+                raise UserError(request.env._(
+                    "Merging duplicate rows is only supported with the CSV format.",
+                ))
+            if deduplicate_columns is not None:
+                deduplicate_columns = self._check_deduplicate_columns(
+                    deduplicate_columns, len(field_names),
+                )
 
         records = Model.browse(ids) if ids else Model.search(domain)
 
@@ -498,7 +582,11 @@ class ExportFormat:
                 all_rows.extend(export_data)
                 batch.invalidate_recordset()
 
-            response_data = self.from_data(fields, columns_headers, all_rows)
+            response_data = self.from_data(
+                fields, columns_headers, all_rows,
+                deduplicate=deduplicate,
+                deduplicate_columns=deduplicate_columns,
+            )
 
         _logger.info(
             "User %d exported %d %r records from %s. Fields: %s. %s: %s",
@@ -518,6 +606,8 @@ class ExportFormat:
 
 
 class CSVExport(ExportFormat, Controller):
+
+    deduplication_supported = True
 
     @route('/web/export/csv', type='http', auth='user')
     def web_export_csv(self, data):
@@ -543,24 +633,28 @@ class CSVExport(ExportFormat, Controller):
     def from_group_data(self, fields, columns_headers, groups):
         raise UserError(request.env._("Exporting grouped data to csv is not supported."))
 
-    def from_data(self, fields, columns_headers, rows):
+    def from_data(self, fields, columns_headers, rows, deduplicate=False, deduplicate_columns=None):
         fp = io.StringIO()
         writer = csv.writer(fp, quoting=1)
 
         writer.writerow(columns_headers)
 
+        seen_keys = set()
         for data in rows:
-            row = []
-            for d in data:
-                if d is None or d is False:
-                    d = ''
-                elif isinstance(d, bytes):
-                    d = d.decode()
-                # Spreadsheet apps tend to detect formulas on leading =, + and -
-                if isinstance(d, str) and d.startswith(('=', '-', '+')):
-                    d = "'" + d
-
-                row.append(d)
+            row = [csv_cell_value(d) for d in data]
+            if deduplicate:
+                if deduplicate_columns is None:
+                    key_cells = row
+                else:
+                    # The other columns are intentionally left untouched: their
+                    # values are not aggregated, the first occurrence wins.
+                    key_cells = [row[column] for column in deduplicate_columns]
+                # The comparison relies on the final CSV cell text (e.g. the
+                # integer 5 and the string "5" become the same text).
+                key = tuple(str(cell) for cell in key_cells)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
             writer.writerow(row)
 
         return fp.getvalue()
@@ -597,7 +691,7 @@ class ExcelExport(ExportFormat, Controller):
 
         return xlsx_writer.value
 
-    def from_data(self, fields, columns_headers, rows):
+    def from_data(self, fields, columns_headers, rows, deduplicate=False, deduplicate_columns=None):
         with ExportXlsxWriter(fields, columns_headers, len(rows)) as xlsx_writer:
             for row_index, row in enumerate(rows):
                 for cell_index, cell_value in enumerate(row):

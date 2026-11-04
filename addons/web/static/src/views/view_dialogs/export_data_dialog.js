@@ -150,6 +150,9 @@ export class ExportDataDialog extends Component {
             templateName: "",
             isSmall: this.uiService.isSmall,
             disabled: false,
+            deduplicate: false,
+            deduplicateAllColumns: true,
+            deduplicateColumns: [],
         });
 
         this.removeFieldText = _t("Remove field");
@@ -228,6 +231,25 @@ export class ExportDataDialog extends Component {
             this.languagesInstalled.length > 1 &&
             this.state.exportList.some(({ translate }) => translate)
         );
+    }
+
+    /**
+     * Merging duplicate rows is only offered for the CSV format and for regular
+     * exports: an import-compatible export must keep every row so that the
+     * relational data can be re-imported faithfully.
+     */
+    get canDeduplicate() {
+        const selectedFormat = this.availableFormats[this.state.selectedFormat];
+        return selectedFormat?.tag === "csv" && !this.isCompatible;
+    }
+
+    /**
+     * Columns that can be used as duplication key. Their positions match the
+     * final output columns (translatable fields are expanded into one column
+     * per language), so duplicated headers stay distinguishable.
+     */
+    get deduplicateColumnChoices() {
+        return this.getFieldsToExport();
     }
 
     get languageChoices() {
@@ -497,13 +519,61 @@ export class ExportDataDialog extends Component {
                 type: "danger",
             });
         }
+        const fields = this.getFieldsToExport();
+        const exportOptions = this.getDeduplicateOptions(fields.length);
+        if (exportOptions === null) {
+            return this.notification.add(
+                _t("Select at least one column identifying the duplicate rows..."),
+                { type: "danger" }
+            );
+        }
         this.state.disabled = true;
         await this.props.download(
-            this.getFieldsToExport(),
+            fields,
             this.isCompatible,
-            this.availableFormats[this.state.selectedFormat].tag
+            this.availableFormats[this.state.selectedFormat].tag,
+            exportOptions
         );
         this.state.disabled = false;
+    }
+
+    onToggleDeduplicate(value) {
+        this.state.deduplicate = value;
+    }
+
+    onChangeDeduplicateMode(ev) {
+        this.state.deduplicateAllColumns = ev.target.value === "all";
+    }
+
+    onToggleDeduplicateColumn(index, ev) {
+        const selectedColumns = new Set(this.state.deduplicateColumns);
+        if (ev.target.checked) {
+            selectedColumns.add(index);
+        } else {
+            selectedColumns.delete(index);
+        }
+        this.state.deduplicateColumns = [...selectedColumns].sort((a, b) => a - b);
+    }
+
+    /**
+     * Build the duplicate-row merging options sent to the export route.
+     * Returns `null` when the selected-columns mode is enabled without any
+     * valid column, so the export can be blocked client-side.
+     */
+    getDeduplicateOptions(columnCount) {
+        if (!this.canDeduplicate || !this.state.deduplicate) {
+            return {};
+        }
+        if (this.state.deduplicateAllColumns) {
+            return { deduplicate: true };
+        }
+        const columns = this.state.deduplicateColumns.filter(
+            (index) => Number.isInteger(index) && index >= 0 && index < columnCount
+        );
+        if (!columns.length) {
+            return null;
+        }
+        return { deduplicate: true, deduplicate_columns: columns };
     }
 
     async onDeleteExportTemplate() {
@@ -574,6 +644,10 @@ export class ExportDataDialog extends Component {
 
     onToggleCompatibleExport(value) {
         this.isCompatible = value;
+        // Duplicate rows cannot be merged for import-compatible exports.
+        if (value) {
+            this.state.deduplicate = false;
+        }
         this.fetchFields(true);
     }
 

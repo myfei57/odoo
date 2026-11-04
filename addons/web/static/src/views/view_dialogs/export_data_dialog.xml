@@ -59,14 +59,38 @@
                         <h3 t-else="" class="text-center text-muted mt-5 o_no_match">No match found.</h3>
                     </div>
                 </div>
-                <label class="d-flex align-items-stretch gap-2">
-                    <span class="form-label mb-0 fw-bold text-nowrap align-self-center">Format</span>
-                    <select class="form-select form-select-sm o_export_format" t-on-change="this.setFormat">
-                        <t t-foreach="this.availableFormats" t-as="format" t-key="format.tag">
-                            <option t-att-value="format.tag" t-att-selected="format.tag === this.availableFormats[this.state.selectedFormat].tag" t-out="format.label" />
-                        </t>
-                    </select>
-                </label>
+                <div class="d-flex flex-column gap-2">
+                    <label class="d-flex align-items-stretch gap-2">
+                        <span class="form-label mb-0 fw-bold text-nowrap align-self-center">Format</span>
+                        <select class="form-select form-select-sm o_export_format" t-on-change="this.setFormat">
+                            <t t-foreach="this.availableFormats" t-as="format" t-key="format.tag">
+                                <option t-att-value="format.tag" t-att-selected="format.tag === this.availableFormats[this.state.selectedFormat].tag" t-out="format.label" />
+                            </t>
+                        </select>
+                    </label>
+                    <div t-if="this.canDeduplicate" class="o_export_deduplicate d-flex flex-column gap-1">
+                        <CheckBox className="'form-switch o_export_deduplicate_toggle'" value="this.state.deduplicate" onChange.bind="this.onToggleDeduplicate">Merge duplicate rows</CheckBox>
+                        <div t-if="this.state.deduplicate" class="ps-3 d-flex flex-column gap-1">
+                            <div class="form-check m-0">
+                                <input class="form-check-input" type="radio" name="o_export_deduplicate_mode" id="o_export_deduplicate_mode_all" value="all" t-att-checked="this.state.deduplicateAllColumns" t-on-change="this.onChangeDeduplicateMode"/>
+                                <label class="form-check-label" for="o_export_deduplicate_mode_all">Based on all exported columns</label>
+                            </div>
+                            <div class="form-check m-0">
+                                <input class="form-check-input" type="radio" name="o_export_deduplicate_mode" id="o_export_deduplicate_mode_selected" value="selected" t-att-checked="!this.state.deduplicateAllColumns" t-on-change="this.onChangeDeduplicateMode"/>
+                                <label class="form-check-label" for="o_export_deduplicate_mode_selected">Based on selected columns</label>
+                            </div>
+                            <ul t-if="!this.state.deduplicateAllColumns" class="o_export_deduplicate_columns list-unstyled d-flex flex-column gap-1 m-0 p-2 border rounded">
+                                <li t-foreach="this.deduplicateColumnChoices" t-as="column" t-key="column_index">
+                                    <div class="form-check m-0">
+                                        <input class="form-check-input" type="checkbox" t-attf-id="o_export_deduplicate_column_{{ column_index }}" t-att-checked="this.state.deduplicateColumns.includes(column_index)" t-on-change="(ev) => this.onToggleDeduplicateColumn(column_index, ev)"/>
+                                        <label class="form-check-label" t-attf-for="o_export_deduplicate_column_{{ column_index }}" t-out="column.string"/>
+                                    </div>
+                                </li>
+                            </ul>
+                            <small class="text-muted">Only the first occurrence of a duplicate row is kept; the other columns are not aggregated.</small>
+                        </div>
+                    </div>
+                </div>
                 <!-- right column -->
                 <div class="d-flex align-items-center">
                     <h4 class="mb-0">Fields to export</h4>
