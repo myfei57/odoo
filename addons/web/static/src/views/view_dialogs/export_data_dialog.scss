@@ -64,6 +64,16 @@
                 cursor: pointer;
             }
         }
+
+        .o_export_field_title {
+            user-select: text;
+            cursor: text;
+        }
+
+        .o_export_field_titled small {
+            font-size: 0.7rem;
+            line-height: 1;
+        }
     }
 }
 

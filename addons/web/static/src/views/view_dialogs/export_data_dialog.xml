@@ -106,11 +106,26 @@
                     </div>
                 </div>
                 <div class="o_right_field_panel p-1 overflow-auto border">
+                    <small t-if="this.state.isEditingTemplate" class="d-block text-muted px-1 pb-1 o_export_field_title_help" t-out="this.customTitleHelpText" />
                     <ul class="o_fields_list list-unstyled" t-ref="this.draggableRef">
                         <t t-foreach="this.state.exportList" t-as="field" t-key="field.id">
                             <li t-attf-class="o_export_field d-flex align-items-center w-100 {{ this.state.isSmall ? '' : 'o_export_field_sortable' }}" t-att-data-field_id="field.id">
                                 <span t-if="!this.state.isSmall" class="oi o_sort_field mx-1" data-icon="swap_vert" t-attf-style="opacity:{{ this.state.exportList.length === 1 ? 0 : 1 }}" />
-                                <span class="flex-grow-1 text-truncate" t-out="this.debugMode.isActive() and field.id ? `${field.string} (${field.id})` : field.string" />
+                                <input
+                                    t-if="this.state.isEditingTemplate"
+                                    type="text"
+                                    class="form-control form-control-sm flex-grow-1 o_export_field_title"
+                                    t-att-placeholder="this.getFieldDefaultLabel(field)"
+                                    t-att-title="this.customTitleText"
+                                    t-att-aria-label="this.customTitleText"
+                                    t-att-value="field.title or ''"
+                                    t-on-input="(ev) => this.onFieldTitleInput(field, ev)"
+                                />
+                                <span t-elif="field.title" class="flex-grow-1 min-w-0 d-flex flex-column o_export_field_titled">
+                                    <span class="text-truncate" t-out="this.debugMode.isActive() and field.id ? `${field.title} (${field.id})` : field.title" />
+                                    <small class="text-muted text-truncate" t-out="field.string" />
+                                </span>
+                                <span t-else="" class="flex-grow-1 text-truncate" t-out="this.getFieldDefaultLabel(field)" />
                                 <span class="oi oi-filled p-1 o_remove_field cursor-pointer" data-icon="delete" t-att-title="this.removeFieldText" t-on-click.stop="() => this.onRemoveItemExportList(field.id)" />
                             </li>
                         </t>

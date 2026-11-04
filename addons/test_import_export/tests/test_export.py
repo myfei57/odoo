@@ -125,15 +125,72 @@ class TestExport(XlsxCreatorCase):
         }])
 
         self.assertEqual(get_namelist(export.id), {
-            'fields': [{'field_type': 'many2one', 'id': 'partner_id', 'string': 'Related Partner', 'translate': False},
-                       {'field_type': 'char', 'id': 'login', 'string': 'Login', 'translate': False},
-                       {'field_type': 'boolean', 'id': 'active', 'string': 'Active', 'translate': False}],
+            'fields': [{'field_type': 'many2one', 'id': 'partner_id', 'string': 'Related Partner', 'translate': False, 'title': False},
+                       {'field_type': 'char', 'id': 'login', 'string': 'Login', 'translate': False, 'title': False},
+                       {'field_type': 'boolean', 'id': 'active', 'string': 'Active', 'translate': False, 'title': False}],
             'export_languages': ['fr_FR'],
         })
 
         # languages that are uninstalled afterwards are not part of the template anymore
         lang_fr.active = False
         self.assertEqual(get_namelist(export.id)['export_languages'], [])
+
+    def test_export_template_custom_titles(self):
+        def get_namelist(export_id):
+            res = self.url_open(
+                "/web/export/namelist",
+                data=json.dumps({"params": {"model": 'res.users', 'export_id': export_id}}),
+                headers={"Content-Type": "application/json"},
+            )
+            return json.loads(res.content)['result']
+
+        export = self.env['ir.exports'].create([{
+            'name': 'Export with custom titles',
+            'resource': 'res.users',
+            'export_fields': [Command.create({'name': 'login', 'title': 'User Login'}),
+                              Command.create({'name': 'partner_id/name', 'title': 'Contact Name'}),
+                              Command.create({'name': 'active'})],
+        }])
+
+        fields = get_namelist(export.id)['fields']
+        # titles are restored, including for nested relational paths, and stay
+        # aligned with their technical field/order
+        self.assertEqual([field['id'] for field in fields],
+                         ['login', 'partner_id/name', 'active'])
+        self.assertEqual([field['title'] for field in fields],
+                         ['User Login', 'Contact Name', False])
+        # the display names are still resolved and untouched
+        self.assertEqual(fields[1]['string'], 'Related Partner/Name')
+
+    def test_export_custom_column_headers(self):
+        def export_csv(fields, import_compat=False):
+            params = dict(
+                self.default_params,
+                model='res.partner',
+                fields=fields,
+                import_compat=import_compat,
+            )
+            res = self.url_open(
+                '/web/export/csv',
+                data={'data': json.dumps(params), 'csrf_token': self.csrf_token()},
+            )
+            return res.content.decode().splitlines()[0]
+
+        # a regular export uses the custom titles sent by the client
+        header = export_csv([{'name': 'name', 'label': 'Partner Custom Title'}])
+        self.assertEqual(header, 'Partner Custom Title')
+
+        # no custom title: the field display name is used
+        header = export_csv([{'name': 'name', 'label': 'Name'}])
+        self.assertEqual(header, 'Name')
+
+        # import-compatible exports always use the technical field names,
+        # regardless of the provided titles
+        header = export_csv(
+            [{'name': 'name', 'label': 'Partner Custom Title'}],
+            import_compat=True,
+        )
+        self.assertEqual(header, 'name')
 
     def test_import_compatible_export(self):
         test_model = 'res.company'

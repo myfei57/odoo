@@ -137,7 +137,10 @@ export function useExportRecords(env, context, getDefaultExportList) {
         const root = model.root;
         const exportedFields = fields.map((field) => ({
             name: field.name || field.id,
-            label: field.label || field.string,
+            // a custom title saved on an export template takes precedence over
+            // the field display name; the server still ignores it and forces
+            // the technical names when the export is import-compatible
+            label: field.title || field.label || field.string,
             store: field.store,
             type: field.field_type || field.type,
         }));

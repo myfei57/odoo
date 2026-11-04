@@ -387,8 +387,11 @@ class Export(Controller):
     @route('/web/export/namelist', type='jsonrpc', auth='user', readonly=True)
     def namelist(self, model, export_id):
         export = self.env['ir.exports'].browse([export_id])
+        field_titles = {line.name: line.title for line in export.export_fields}
         return {
-            'fields': self.env['ir.exports']._get_fields_info(model, export.export_fields.mapped('name')),
+            'fields': self.env['ir.exports']._get_fields_info(
+                model, export.export_fields.mapped('name'), field_titles,
+            ),
             'export_languages': export.export_language_ids.filtered('active').mapped('code'),
         }
 

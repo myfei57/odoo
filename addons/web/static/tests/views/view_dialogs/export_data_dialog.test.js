@@ -67,6 +67,7 @@ class IrExports extends models.Model {
 class IrExportsLine extends models.Model {
     _name = "ir.exports.line";
     name = fields.Char();
+    title = fields.Char();
     export_id = fields.Many2one({ relation: "ir.exports" });
 }
 class ResLang extends models.Model {
@@ -1591,6 +1592,134 @@ test("Export dialog: export templates remember the selected languages", async ()
     await contains(".o_save_list_name").edit("Translated template copy", { confirm: false });
     await contains(".o_save_list_btn").click();
     expect.verifySteps(["create template"]);
+});
+
+test("Export dialog: custom column titles of export templates", async () => {
+    ResLang._records[1].active = true;
+    const downloadPayloads = [];
+    patchWithCleanup(download, {
+        _download: (options) => {
+            downloadPayloads.push(JSON.parse(options.data.data));
+            expect.step(options.url);
+        },
+    });
+    onRpc("/web/export/formats", () => [{ tag: "csv", label: "CSV" }]);
+    onRpc("/web/export/get_fields", () =>
+        fetchedFields.root.map((field) =>
+            field.id === "foo" ? { ...field, translate: true } : field
+        )
+    );
+    onRpc("/web/export/namelist", async (request) => {
+        const { params } = await request.json();
+        if (params.export_id === 1) {
+            return {
+                fields: [
+                    {
+                        id: "foo",
+                        string: "Foo",
+                        field_type: "char",
+                        translate: true,
+                        title: "Custom Foo",
+                    },
+                    {
+                        id: "bar",
+                        string: "Bar",
+                        field_type: "boolean",
+                        translate: false,
+                        title: false,
+                    },
+                ],
+                export_languages: [],
+            };
+        }
+        return { fields: [], export_languages: [] };
+    });
+    onRpc(({ args, method, model }) => {
+        if (model !== "ir.exports") {
+            return;
+        }
+        if (method === "search_read") {
+            return [{ id: 1, name: "Customized template" }];
+        }
+        if (method === "write") {
+            expect.step("template updated");
+            const created = args[1].export_fields
+                .filter((command) => command[0] === 0)
+                .map((command) => command[2]);
+            expect(created).toEqual(
+                [
+                    { name: "foo", sequence: 10, title: "Updated Foo" },
+                    { name: "bar", sequence: 20, title: false },
+                ],
+                { message: "the custom titles are saved per field, blank ones as false" }
+            );
+            return true;
+        }
+    });
+
+    await mountView({
+        type: "list",
+        resModel: "partner",
+        arch: `<list><field name="foo"/></list>`,
+        loadActionMenus: true,
+    });
+
+    await openExportDialog();
+
+    // the saved titles are restored: the custom title is shown together with
+    // the original field label, while untitled fields keep their usual label
+    await select("1", { target: ".o_exported_lists_select" });
+    await animationFrame();
+    expect(".o_export_field:nth-child(1) .o_export_field_titled > span").toHaveText(
+        "Custom Foo"
+    );
+    expect(".o_export_field:nth-child(1) .o_export_field_titled small").toHaveText("Foo");
+    expect(".o_export_field:nth-child(2)").toHaveText("Bar");
+
+    // exporting uses the custom titles and keeps the technical names untouched
+    await contains(".o_select_button").click();
+    expect(downloadPayloads.at(-1).fields.map((field) => [field.name, field.label])).toEqual(
+        [
+            ["foo", "Custom Foo"],
+            ["bar", "Bar"],
+        ]
+    );
+
+    // editing the template updates the per-field titles
+    await contains(".o_edit_exported_list").click();
+    expect(".o_export_field_title").toHaveCount(2);
+    expect(".o_export_field:nth-child(1) .o_export_field_title").toHaveValue("Custom Foo");
+    expect(".o_export_field:nth-child(2) .o_export_field_title").toHaveValue("");
+    await contains(".o_export_field:nth-child(1) .o_export_field_title").edit("Updated Foo", {
+        confirm: false,
+    });
+    // a whitespace-only title is considered blank
+    await contains(".o_export_field:nth-child(2) .o_export_field_title").edit("   ", {
+        confirm: false,
+    });
+    await contains(".o_save_list_btn").click();
+    await animationFrame();
+    expect.verifySteps(["template updated"]);
+    // the row reflects the updated title; bar falls back to its display name
+    expect(".o_export_field:nth-child(1) .o_export_field_titled > span").toHaveText(
+        "Updated Foo"
+    );
+    expect(".o_export_field:nth-child(2)").toHaveText("Bar");
+
+    // multi-language columns suffix the custom title like the technical name
+    await contains(".o_export_languages .o-autocomplete input").click();
+    await runAllTimers();
+    await contains(`.o-autocomplete--dropdown-item:contains("French / Français")`).click();
+    await contains(".o_select_button").click();
+    expect(downloadPayloads.at(-1).fields.map((field) => field.name)).toEqual([
+        "foo@fr_FR",
+        "bar",
+    ]);
+    expect(downloadPayloads.at(-1).fields.map((field) => field.label)).toEqual([
+        "Updated Foo@fr_FR",
+        "Bar",
+    ]);
+    expect.verifySteps(["/web/export/csv", "/web/export/csv"]);
 });
 
 test.tags("desktop");

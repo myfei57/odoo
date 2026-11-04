@@ -77,11 +77,16 @@ class IrExports(models.Model):
         return property_fields
 
     @api.model
-    def _get_fields_info(self, model, export_fields):
+    def _get_fields_info(self, model, export_fields, field_titles=None):
         """Resolve a list of technical export paths (e.g. ``partner_id/name``)
-        into ``{'id', 'string', 'field_type', 'translate'}`` dicts whose ``string`` is the
+        into ``{'id', 'string', 'field_type', 'translate', 'title'}`` dicts whose ``string`` is the
         human readable label of the (possibly nested) field.
+
+        ``field_titles`` is an optional mapping of technical export paths to the
+        custom column titles saved on the template lines; ``title`` is ``False``
+        when no custom title was defined for a field.
         """
+        field_titles = field_titles or {}
         field_info = []
         fields = self.env[model].fields_get(
             attributes=[
@@ -127,9 +132,18 @@ class IrExports(models.Model):
             subfields = list(subfields)
             if length == 2:
                 # subfields is a seq of $base/*rest, and not loaded yet
+                # titles are keyed by the full path: re-key the titles of the
+                # subfields relatively to the related model before recursing
+                subfield_prefix = base + '/'
+                subfield_titles = {
+                    path[len(subfield_prefix):]: title
+                    for path, title in field_titles.items()
+                    if path.startswith(subfield_prefix)
+                }
                 field_info.extend(
                     self._graft_subfields(
-                        fields[base]['relation'], base, fields[base]['string'], subfields
+                        fields[base]['relation'], base, fields[base]['string'], subfields,
+                        subfield_titles,
                     ),
                 )
             elif base in fields:
@@ -139,13 +153,14 @@ class IrExports(models.Model):
                     'string': field_dict['string'],
                     'field_type': field_dict['type'],
                     'translate': bool(field_dict.get('translate')),
+                    'title': field_titles.get(base, False),
                 })
 
         indexes_dict = {fname: i for i, fname in enumerate(export_fields)}
         return sorted(field_info, key=lambda field_dict: indexes_dict[field_dict['id']])
 
     @api.model
-    def _graft_subfields(self, model, prefix, prefix_string, fields):
+    def _graft_subfields(self, model, prefix, prefix_string, fields, field_titles=None):
         export_fields = [field.split('/', 1)[1] for field in fields]
         return (
             dict(
@@ -153,7 +168,7 @@ class IrExports(models.Model):
                 id=f"{prefix}/{field_info['id']}",
                 string=f"{prefix_string}/{field_info['string']}",
             )
-            for field_info in self._get_fields_info(model, export_fields)
+            for field_info in self._get_fields_info(model, export_fields, field_titles)
         )
 
 
@@ -164,4 +179,11 @@ class IrExportsLine(models.Model):
 
     sequence = fields.Integer(default=10)
     name = fields.Char(string='Field Name')
+    title = fields.Char(
+        string='Column Title',
+        help="Custom title of the column in the exported CSV/XLSX file. When "
+             "left empty, the field's display name is used. The title never "
+             "alters the exported field, its order or its value, and is ignored "
+             "in import-compatible exports, which always use the technical field names.",
+    )
     export_id = fields.Many2one('ir.exports', string='Export', index=True, ondelete='cascade')

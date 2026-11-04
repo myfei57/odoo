@@ -155,6 +155,10 @@ export class ExportDataDialog extends Component {
         this.removeFieldText = _t("Remove field");
         this.applyChangesText = _t("Apply changes");
         this.noChangesText = _t("No changes to apply");
+        this.customTitleText = _t("Custom column title");
+        this.customTitleHelpText = _t(
+            "Custom column titles for CSV/XLSX exports. Leave blank to use the field display names. Technical names are always used for re-importable exports."
+        );
 
         this.debouncedOnResize = useDebounced(this.updateSize.bind(this), 300);
 
@@ -162,7 +166,7 @@ export class ExportDataDialog extends Component {
             // Params
             ref: this.draggableRef,
             elements: ".o_export_field",
-            ignore: ".o_remove_field",
+            ignore: ".o_remove_field, .o_export_field_title",
             enable: !this.state.isSmall,
             cursor: "grabbing",
             // Hooks
@@ -398,7 +402,9 @@ export class ExportDataDialog extends Component {
     }
 
     onAddItemExportList(fieldId) {
-        this.state.exportList.push(this.knownFields[fieldId]);
+        // clone the canonical available field: per-list data such as a custom
+        // column title must not leak back into the available fields
+        this.state.exportList.push({ ...this.knownFields[fieldId] });
         this.resetTemplateSelection();
     }
 
@@ -406,6 +412,16 @@ export class ExportDataDialog extends Component {
         const item = this.state.exportList.findIndex(({ id }) => id === fieldId);
         this.state.exportList.splice(item, 1);
         this.resetTemplateSelection();
+    }
+
+    onFieldTitleInput(field, ev) {
+        field.title = ev.target.value;
+    }
+
+    getFieldDefaultLabel(field) {
+        return this.debugMode.isActive() && field.id
+            ? `${field.string} (${field.id})`
+            : field.string;
     }
 
     async onChangeExportList(ev) {
@@ -444,8 +460,17 @@ export class ExportDataDialog extends Component {
         const exportLanguageIds = this.canExportTranslations
             ? this.state.exportLanguages.map(({ id }) => id)
             : [];
+        // normalize the custom titles: blank ones are not saved so that the
+        // field display names are used as column headers
+        this.state.exportList.forEach((field) => {
+            field.title = (field.title || "").trim() || false;
+        });
         const exportFieldsCommands = this.state.exportList.map((field, index) =>
-            x2ManyCommands.create(false, { name: field.id, sequence: (index + 1) * 10 })
+            x2ManyCommands.create(false, {
+                name: field.id,
+                sequence: (index + 1) * 10,
+                title: field.title,
+            })
         );
         if (this.state.templateId === "new_template") {
             const [id] = await this.orm.create(
@@ -527,6 +552,8 @@ export class ExportDataDialog extends Component {
      * is replaced by one column per selected export language, using the same
      * `@lang` suffix convention as the import (e.g. `name@fr_FR`) on both the
      * technical name and the label, so the columns stay import-compatible.
+     * A saved custom title is suffixed the same way so that the per-language
+     * columns keep an identifiable correspondence.
      * The unsuffixed column (in the active language) is dropped to avoid
      * exporting the same column twice under different headers.
      */
@@ -542,6 +569,7 @@ export class ExportDataDialog extends Component {
                 ...field,
                 id: `${field.id}@${code}`,
                 string: `${field.string}@${code}`,
+                ...(field.title ? { title: `${field.title}@${code}` } : {}),
             }));
         });
     }
@@ -586,7 +614,11 @@ export class ExportDataDialog extends Component {
             (field) => field.default_export
         );
 
-        this.state.exportList = unique([...defaultExportList, ...defaultExportfields]);
+        // clone the canonical available fields: per-list data such as a custom
+        // column title must not leak back into the available fields
+        this.state.exportList = unique([...defaultExportList, ...defaultExportfields]).map(
+            (field) => ({ ...field })
+        );
     }
 
     setFormat(ev) {
